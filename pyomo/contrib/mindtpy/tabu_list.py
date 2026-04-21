@@ -13,6 +13,18 @@ from pyomo.common.dependencies import attempt_import, UnavailableClass
 cplex, cplex_available = attempt_import('cplex')
 
 
+def _get_callback_integer_solution(discrete_variable_list, solver_var_map, get_values):
+    """Extract the incumbent integer solution from a callback context."""
+    return tuple(
+        int(round(get_values(solver_var_map[var]))) for var in discrete_variable_list
+    )
+
+
+def _should_reject_incumbent(single_tree, curr_int_sol, integer_list):
+    """Return whether the incumbent should be rejected."""
+    return single_tree or curr_int_sol in set(integer_list)
+
+
 class IncumbentCallback_cplex(
     cplex.callbacks.IncumbentCallback if cplex_available else UnavailableClass(cplex)
 ):
@@ -29,14 +41,12 @@ class IncumbentCallback_cplex(
         mindtpy_solver = self.mindtpy_solver
         opt = self.opt
         config = self.config
-        if config.single_tree:
+        mindtpy_solver.curr_int_sol = _get_callback_integer_solution(
+            mindtpy_solver.mip.MindtPy_utils.discrete_variable_list,
+            opt._pyomo_var_to_solver_var_map,
+            self.get_values,
+        )
+        if _should_reject_incumbent(
+            config.single_tree, mindtpy_solver.curr_int_sol, mindtpy_solver.integer_list
+        ):
             self.reject()
-        else:
-            temp = []
-            for var in mindtpy_solver.mip.MindtPy_utils.discrete_variable_list:
-                value = self.get_values(opt._pyomo_var_to_solver_var_map[var])
-                temp.append(int(round(value)))
-            mindtpy_solver.curr_int_sol = tuple(temp)
-
-            if mindtpy_solver.curr_int_sol in set(mindtpy_solver.integer_list):
-                self.reject()

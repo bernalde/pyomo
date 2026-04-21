@@ -98,6 +98,7 @@ jobs:
         python: [ '3.10', 3.11, 3.12, 3.13, 3.14 ]
         other: [""]
         category: [""]
+        test_suite: [pyomo]
 
         include:
         - os: ubuntu-latest
@@ -187,6 +188,25 @@ jobs:
           build_docs: 1
           TARGET: linux
           PYENV: pip
+
+        - os: ubuntu-latest
+          python: 3.12
+          other: /mindtpy-open
+          TARGET: linux
+          PYENV: pip
+          test_docs: 0
+          test_suite: mindtpy-open
+          skip_commercial: 1
+          PACKAGES: cyipopt
+
+        - os: ubuntu-latest
+          python: 3.12
+          other: /mindtpy-commercial
+          TARGET: linux
+          PYENV: pip
+          test_docs: 0
+          test_suite: mindtpy-commercial
+          PACKAGES: cyipopt
 
 
     steps:
@@ -347,7 +367,7 @@ jobs:
         python -m pip install --cache-dir cache/pip ${PACKAGES}
         python -m pip install --cache-dir cache/pip pymysql || \
             python -m pip install --cache-dir cache/pip pymysql
-        if test -z "${{matrix.slim}}"; then
+        if test -z "${{matrix.slim}}" && test -z "${{matrix.skip_commercial}}"; then
             python -m pip install --cache-dir cache/pip cplex docplex \
                 || echo "WARNING: CPLEX Community Edition is not available"
             python -m pip install --cache-dir cache/pip gurobipy \
@@ -418,7 +438,7 @@ jobs:
         # Note: this will fail the build if any installation fails (or
         # possibly if it outputs messages to stderr)
         conda install --update-deps -q -y python="${{matrix.python}}" $CONDA_DEPENDENCIES
-        if test -z "${{matrix.slim}}"; then
+        if test -z "${{matrix.slim}}" && test -z "${{matrix.skip_commercial}}"; then
             # xpress.init() (xpress 9.5.1 from conda) hangs indefinitely
             # on GHA/Windows under Python 3.10 and 3.11.  Exclude that
             # release on that platform.
@@ -762,14 +782,32 @@ jobs:
         pyomo help --transformations || exit 1
         pyomo help --writers || exit 1
 
-    - name: Run Pyomo tests
+    - name: Run test suite
       if: ${{ matrix.mpi == 0 && matrix.category != 'notests' }}
       run: |
         export PATH=$PYOMO_PATH
-        $PYTHON_EXE -m pytest -v \
-            -W ignore::Warning ${{matrix.category}} \
-            pyomo `pwd`/pyomo-model-libraries \
-            `pwd`/examples `pwd`/doc --junitxml="TEST-pyomo.xml"
+        case "${{ matrix.test_suite }}" in
+          pyomo)
+            $PYTHON_EXE -m pytest -v \
+                -W ignore::Warning ${{matrix.category}} \
+                pyomo `pwd`/pyomo-model-libraries \
+                `pwd`/examples `pwd`/doc --junitxml="TEST-pyomo.xml"
+            ;;
+          mindtpy-open)
+            $PYTHON_EXE -m pytest -v -W ignore::Warning \
+                pyomo/contrib/mindtpy/tests \
+                --junitxml="TEST-mindtpy-open.xml"
+            ;;
+          mindtpy-commercial)
+            $PYTHON_EXE -m pytest -v -W ignore::Warning \
+                pyomo/contrib/mindtpy/tests \
+                --junitxml="TEST-mindtpy-commercial.xml"
+            ;;
+          *)
+            echo "Unknown test suite: ${{ matrix.test_suite }}"
+            exit 1
+            ;;
+        esac
 
     - name: Run Pyomo MPI tests
       if: ${{ matrix.mpi != 0 && matrix.category != 'notests' }}
@@ -803,8 +841,18 @@ jobs:
     - name: Process code coverage report
       run: |
         coverage combine
-        coverage report -i
-        coverage xml -i
+        if test "${{ matrix.test_suite }}" = mindtpy-open; then
+            coverage report -i \
+                --include='pyomo/contrib/mindtpy/*' \
+                --omit='pyomo/contrib/mindtpy/tests/*' \
+                --fail-under=90
+            coverage xml -i \
+                --include='pyomo/contrib/mindtpy/*' \
+                --omit='pyomo/contrib/mindtpy/tests/*'
+        else
+            coverage report -i
+            coverage xml -i
+        fi
 
     - name: Record build artifacts
       uses: actions/upload-artifact@v4
@@ -972,8 +1020,18 @@ jobs:
             coverage xml || coverage xml -i
         fi
 
+    - name: Upload combined coverage artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: combined-coverage-${{ matrix.TARGET }}
+        include-hidden-files: true
+        if-no-files-found: ignore
+        path: |
+          coverage.xml
+          coverage-other.xml
+
     - name: Upload codecov reports
-      if: github.repository_owner == 'Pyomo' || github.ref != 'refs/heads/main'
+      if: hashFiles('coverage.xml') != '' && secrets.PYOMO_CODECOV_TOKEN != ''
       uses: codecov/codecov-action@v5
       with:
         files: coverage.xml
@@ -985,7 +1043,7 @@ jobs:
     - name: Upload other coverage reports
       if: |
         hashFiles('coverage-other.xml') != '' &&
-        (github.repository_owner == 'Pyomo' || github.ref != 'refs/heads/main')
+        secrets.PYOMO_CODECOV_TOKEN != ''
       uses: codecov/codecov-action@v5
       with:
         files: coverage-other.xml
